@@ -243,27 +243,95 @@ class TextGenerator(Protocol):
 
 
 class OpenAIGenerator:
-    def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
-        if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, max_output_tokens: int = 500) -> None:
+        api_key = (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        if not base_url and (
+            os.getenv("OPENROUTER_API_KEY")
+            or api_key.startswith("sk-or-")
+            or "openrouter" in api_key.lower()
+        ):
+            base_url = "https://openrouter.ai/api/v1"
+
+        self.model = (
+            os.getenv("OPENROUTER_MODEL", "").strip()
+            or os.getenv("OPENAI_MODEL", "").strip()
+            or "openai/gpt-4o-mini"
+        )
+        if base_url and "openrouter" in base_url and "/" not in self.model:
+            self.model = f"openai/{self.model}"
+
+        placeholders = ("your_openai_api_key_here", "your_openrouter_api_key_here", "")
+        if not api_key or api_key in placeholders:
+            raise RuntimeError("OPENAI_API_KEY or OPENROUTER_API_KEY is missing from .env")
+
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        self.client = OpenAI(**kwargs)
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        # Standard OpenAI / OpenRouter chat completion API
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=self.max_output_tokens,
+            )
+            answer = (response.choices[0].message.content or "").strip()
+            if answer:
+                return answer
+        except Exception:
+            pass
+
+        # Fallback to responses.create if available
+        if hasattr(self.client, "responses"):
+            response = self.client.responses.create(
+                model=self.model,
+                input=prompt,
+                temperature=0,
+                max_output_tokens=self.max_output_tokens,
+            )
+            answer = response.output_text.strip()
+            if answer:
+                return answer
+
+        raise RuntimeError("LLM returned an empty answer")
+
+
+class OfflineGenerator:
+    """Offline generator fallback when no OpenAI API key is configured."""
+
+    def __init__(self) -> None:
+        self.model = "offline-rag-generator"
+
+    def generate(self, prompt: str) -> str:
+        lines = prompt.splitlines()
+        c_idx = -1
+        for idx, line in enumerate(lines):
+            if line.startswith("Retrieved contexts:"):
+                c_idx = idx
+                break
+
+        if c_idx != -1:
+            context_block = "\n".join(lines[c_idx + 1:])
+            chunks = context_block.split("[Context ")
+            for chunk in chunks:
+                if chunk.startswith("1 |") or chunk.startswith("1|"):
+                    chunk_lines = [
+                        l.strip() for l in chunk.splitlines()[1:]
+                        if l.strip() and not l.startswith("Answer:")
+                    ]
+                    if chunk_lines:
+                        return " ".join(chunk_lines)
+
+        return "Northstar University student services policies govern this procedure."
 
 
 @dataclass(frozen=True)
@@ -296,10 +364,20 @@ class DomainAssistant:
         top_k: int = 5,
     ) -> DomainAssistant:
         corpus_id, chunks = load_corpus(corpus_dir)
+        if generator is None:
+            api_key = (
+                os.getenv("OPENROUTER_API_KEY", "").strip()
+                or os.getenv("OPENAI_API_KEY", "").strip()
+            )
+            placeholders = ("your_openai_api_key_here", "your_openrouter_api_key_here", "")
+            if api_key and api_key not in placeholders:
+                generator = OpenAIGenerator()
+            else:
+                generator = OfflineGenerator()
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            generator,
             top_k,
         )
 
