@@ -30,11 +30,11 @@ critical.
 
 | Metric | Acceptable Low Score Scenario | Critical Low Score Scenario | Action Required |
 |---|---|---|---|
-| Faithfulness | | | |
-| Answer Relevance | | | |
-| Context Recall | | | |
-| Context Precision | | | |
-| Completeness | | | |
+| Faithfulness | Khi câu hỏi mang tính ngoại suy rộng hơn context hoặc out-of-scope mà agent trả lời bằng tri thức chung không gây hại. | Agent bịa đặt (hallucinate) sai thông tin chính sách, học phí, ngày hạn nộp đơn trái với context. | Thắt chặt prompt grounding, yêu cầu từ chối khi context không có thông tin, tăng penalty với hallucination. |
+| Answer Relevance | Câu trả lời quá ngắn gọn (đúng trọng tâm nhưng ít từ trùng khớp với question) hoặc dùng từ đồng nghĩa khác. | Answer đi lạc đề hoàn toàn, trả lời sang quy định/chính sách khác không liên quan đến thắc mắc. | Tối ưu hóa System Prompt, cải thiện Intent Classification, yêu cầu trả lời trực tiếp câu hỏi trước. |
+| Context Recall | `expected_answer` chứa thông tin bổ sung quá chi tiết mà context không nhất thiết phải phủ hết. | Retriever bỏ sót tài liệu chứa thông tin cốt lõi (ví dụ bỏ sót điều kiện miễn giảm học phí). | Cải tiến Retriever: tăng Top-K, kết hợp Hybrid Search (BM25 + Dense Retrieval) hoặc Reranking. |
+| Context Precision | Các chunk liên quan đứng ở vị trí k=2 hoặc k=3 (thay vì k=1) nhưng LLM vẫn đọc và trích xuất đúng. | Các chunk chứa thông tin đúng bị đẩy xuống cuối (k > 5) hoặc danh sách chứa quá nhiều chunk nhiễu. | Thêm bước Reranking bằng Cross-Encoder để đẩy chunk quan trọng lên vị trí đầu; tinh chỉnh chunk size. |
+| Completeness | Trả lời đúng các ý chính cốt lõi nhưng bỏ qua các ví dụ minh họa phụ hoặc các chi tiết không bắt buộc. | Bỏ sót điều kiện tiên quyết hoặc các bước bắt buộc trong quy trình (ví dụ bỏ sót hạn nộp đơn). | Cải thiện Generation Prompt yêu cầu liệt kê đầy đủ tất cả điều kiện/bước dưới dạng danh sách bullet points. |
 
 ### Exercise 1.2 — Bias trong LLM-as-a-Judge
 
@@ -47,14 +47,23 @@ Ba bias thường gặp:
 **Câu 1: Thiết kế experiment phát hiện position bias với ít nhất hai conditions.**
 
 > *Câu trả lời:*
+> - **Condition 1 (Thứ tự gốc):** Gửi cho LLM Judge cặp câu trả lời theo thứ tự `[Prompt + Context + Answer A (Vị trí 1) + Answer B (Vị trí 2)]`.
+> - **Condition 2 (Đảo vị trí):** Gửi cùng prompt/context nhưng đảo ngược vị trí `[Prompt + Context + Answer B (Vị trí 1) + Answer A (Vị trí 2)]`.
+> - **Đánh giá & Kết luận:** Nếu Judge chọn Answer A ở Condition 1 nhưng chuyển sang chọn Answer B ở Condition 2 (luôn ưu tiên Vị trí 1), ta kết luận Judge bị Position Bias. Giải pháp khắc phục là chạy cả 2 conditions và lấy điểm trung bình (Pairwise Swap / Position Swapping).
 
 **Câu 2: Làm thế nào giảm verbosity bias bằng rubric design?**
 
 > *Câu trả lời:*
+> 1. Định nghĩa rõ tiêu chí chấm điểm dựa trên **mật độ thông tin chính xác (information density)** và tính đầy đủ của bằng chứng, không chấm dựa trên độ dài từ/câu.
+> 2. Đưa vào Rubric tiêu chí phạt (Penalty Rule) đối với câu trả lời dài dòng, chứa từ ngữ hoa mỹ hoặc lặp từ nhưng không bổ sung giá trị thông tin mới.
+> 3. Yêu cầu Judge trích xuất các ý chính (Key facts extraction) trước khi đưa ra điểm số tổng kết.
 
 **Câu 3: Tại sao cần calibrate LLM judge với human labels?**
 
 > *Câu trả lời:*
+> - LLM Judge vẫn có các điểm mù (bias nội tại, trôi chảy nhưng sai sự thật, hiểu sai nuance miền chuyên môn sâu).
+> - Human Labels (được dán nhãn bởi chuyên gia miền Student Services) đóng vai trò là "Ground Truth" để kiểm chứng.
+> - Calibration giúp tính toán độ tương quan (như Cohen's Kappa hoặc Spearman Rank Correlation) giữa LLM Judge và Human Judge. Qua đó tinh chỉnh Prompt / Rubric cho tới khi LLM Judge đạt độ đồng thuận cao với con người (> 80–85%), giúp pipeline đánh giá tự động vừa nhanh vừa tin cậy.
 
 ### Exercise 1.3 — Evaluation trong CI/CD
 
@@ -62,13 +71,16 @@ Ba bias thường gặp:
 
 | Metric | Threshold | Lý do |
 |---|---:|---|
-| Faithfulness | | |
-| Answer Relevance | | |
-| Completeness | | |
+| Faithfulness | **0.85** | Tránh bịa đặt thông tin chính sách/quy định. Bịa đặt thông tin gây hậu quả nghiêm trọng về niềm tin sinh viên và pháp lý. |
+| Answer Relevance | **0.80** | Đảm bảo câu trả lời giải quyết đúng thắc mắc của sinh viên, không trả lời lan man hoặc nhầm chủ đề. |
+| Completeness | **0.75** | Cần đảm bảo đủ các bước quan trọng. Chấp nhận 0.75 nếu đã nắm trọn các ý cốt lõi mà chỉ thiếu ví dụ hoặc chi tiết phụ. |
 
 **Câu 2: Khi nào dùng offline evaluation, online evaluation và human review?**
 
 > *Câu trả lời:*
+> - **Offline Evaluation:** Dùng trong quá trình phát triển (Dev/Staging) trước khi release phiên bản prompt/model/retriever mới. Chạy tự động trên Golden Dataset 20 câu để làm Quality Gate cho CI/CD pipeline (nếu score < threshold ➔ block deploy).
+> - **Online Evaluation:** Dùng trên môi trường Production với real user traffic. Theo dõi liên tục các chỉ số như user feedback (thumbs up/down), latency, cost, hoặc dùng Evaluator/Langfuse/TruLens chấm điểm ngẫu nhiên trên sample traffic thực tế.
+> - **Human Review:** Dùng định kỳ (hàng tuần/tháng) hoặc đối với các edge cases, các câu hỏi bị user phản hồi tiêu cực (thumbs down), các câu hỏi có điểm offline nằm ở vùng nghi vấn (0.5 – 0.7). Human Review dùng để cập nhật Golden Dataset và calibrate LLM Judge.
 
 ---
 
